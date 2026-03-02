@@ -1,0 +1,1205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>MedWiki</title>
+
+<!-- React -->
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<!-- Babel for JSX -->
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+<!-- Firebase -->
+<script type="module">
+  import { initializeApp }                              from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+  import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged }
+                                                        from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+  import { getFirestore, doc, getDoc, setDoc, deleteDoc }
+                                                        from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+  // ══════════════════════════════════════════════════════════════
+  // 🔧 PASTE YOUR FIREBASE CONFIG HERE
+  // Get it from: Firebase Console → Project Settings → Your Apps
+  // ══════════════════════════════════════════════════════════════
+  const firebaseConfig = {
+    apiKey:            "AIzaSyBmWDaNqPTxYGLYw1ttuuNt9-cKuLfT2wM",
+    authDomain:        "medwiki-d9836.firebaseapp.com",
+    projectId:         "medwiki-d9836",
+    storageBucket:     "medwiki-d9836.firebasestorage.app",
+    messagingSenderId: "551783854741",
+    appId:             "1:551783854741:web:189e7978e6a61bb635a19c",
+  };
+  // ══════════════════════════════════════════════════════════════
+
+  const app  = initializeApp(firebaseConfig);
+  const auth = getAuth(app);
+  const db   = getFirestore(app);
+
+  // Expose to the React app via window
+  window._firebase = {
+    auth, db, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged,
+    doc, getDoc, setDoc, deleteDoc,
+  };
+</script>
+
+<style>
+  body { margin: 0; background: #0d1117; }
+  #root { height: 100vh; }
+
+  /* ── Sign-in screen ── */
+  .signin-screen {
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: center; height: 100vh;
+    background: #0d1117; gap: 24px;
+    font-family: 'IBM Plex Mono', monospace;
+  }
+  .signin-logo  { font-size: 48px; }
+  .signin-title { font-family: 'Playfair Display', serif; font-size: 28px;
+                  color: #d4a017; letter-spacing: 1px; }
+  .signin-sub   { font-size: 13px; color: #6b7280; }
+  .google-btn   {
+    display: flex; align-items: center; gap: 12px;
+    background: #fff; color: #222; border: none; border-radius: 8px;
+    padding: 14px 28px; font-size: 15px; font-weight: 600;
+    font-family: 'IBM Plex Mono', monospace; cursor: pointer;
+    box-shadow: 0 2px 12px rgba(0,0,0,.4); transition: transform .15s, box-shadow .15s;
+  }
+  .google-btn:hover  { transform: translateY(-1px); box-shadow: 0 4px 20px rgba(0,0,0,.5); }
+  .google-btn:active { transform: translateY(0); }
+  .google-btn img    { width: 22px; height: 22px; }
+  .signin-error      { color: #e05c5c; font-size: 13px; max-width: 320px; text-align: center; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useCallback, useRef, createContext, useContext } = React;
+
+// ════════════════════════════════════════════════════════════════════════════
+// FIREBASE HELPERS  (swappable — rest of app doesn't touch Firebase directly)
+// ════════════════════════════════════════════════════════════════════════════
+async function fbLoad(uid) {
+  const { db, doc, getDoc } = window._firebase;
+  const snap = await getDoc(doc(db, "users", uid, "kb", "data"));
+  return snap.exists() ? snap.data().payload : null;
+}
+async function fbSave(uid, data) {
+  const { db, doc, setDoc } = window._firebase;
+  await setDoc(doc(db, "users", uid, "kb", "data"), { payload: data, updatedAt: Date.now() });
+}
+async function fbSaveSync(uid, code, payload) {
+  const { db, doc, setDoc } = window._firebase;
+  await setDoc(doc(db, "syncs", code), { payload, createdAt: Date.now() });
+}
+async function fbLoadSync(code) {
+  const { db, doc, getDoc } = window._firebase;
+  const snap = await getDoc(doc(db, "syncs", code));
+  return snap.exists() ? snap.data().payload : null;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// CONSTANTS & HELPERS
+// ════════════════════════════════════════════════════════════════════════════
+const uid = () => Math.random().toString(36).slice(2, 10);
+
+const DEFAULT_COLUMNS = ["Definition","Clinical Features","Risk Factors","Investigations","Management","Prognosis","Gross Pathology","Microscopy"];
+
+const BLOCK_TYPES = [
+  { type:"text",     label:"Text",      icon:"¶"  },
+  { type:"bullet",   label:"Bullets",   icon:"•"  },
+  { type:"numbered", label:"Numbered",  icon:"1." },
+  { type:"alpha",    label:"Alpha",     icon:"a." },
+  { type:"roman",    label:"Roman",     icon:"i." },
+  { type:"check",    label:"Checklist", icon:"☑"  },
+  { type:"arrow",    label:"Arrows",    icon:"→"  },
+  { type:"mindmap",  label:"Mind Map",  icon:"✦"  },
+  { type:"image",    label:"Image",     icon:"🖼"  },
+  { type:"table",    label:"Table",     icon:"⊞"  },
+];
+
+const makeBlock = (type) => ({
+  id:uid(), type,
+  content: type==="text" ? "" : type==="image" ? null : type==="table" ? {rows:[["",""],["",""]],headers:["Column 1","Column 2"]} : [],
+  mindmap: type==="mindmap" ? {center:"Topic",nodes:[],layout:"radial"} : undefined,
+});
+const makeListItem = () => ({ id:uid(), text:"", checked:false });
+const getPrefix = (type,idx) => {
+  if(type==="bullet")  return "•";
+  if(type==="numbered")return `${idx+1}.`;
+  if(type==="alpha")   return `${String.fromCharCode(97+idx)}.`;
+  if(type==="roman")   return (["i","ii","iii","iv","v","vi","vii","viii","ix","x"][idx])||`${idx+1}.`;
+  if(type==="arrow")   return "→";
+  return "";
+};
+
+const INITIAL_DATA = {
+  tree:{ id:"root", name:"My Knowledge Base", type:"folder", children:[] },
+  entries:{}, globalColumns: DEFAULT_COLUMNS, trash:[],
+};
+
+function findNode(node,id){ if(node.id===id)return node; if(node.children)for(const c of node.children){const f=findNode(c,id);if(f)return f;} return null; }
+function getAllEntries(node,acc=[]){ if(node.type==="entry")acc.push(node.id); (node.children||[]).forEach(c=>getAllEntries(c,acc)); return acc; }
+function updateNodeTree(tree,id,fn){ if(tree.id===id)return fn(tree); return{...tree,children:(tree.children||[]).map(c=>updateNodeTree(c,id,fn))}; }
+function removeNodeTree(tree,id){ return{...tree,children:(tree.children||[]).filter(c=>c.id!==id).map(c=>removeNodeTree(c,id))}; }
+function getPath(tree,id,path=[]){ if(tree.id===id)return path; if(tree.children)for(const c of tree.children){const r=getPath(c,id,[...path,tree]);if(r)return r;} return null; }
+function reorderChildren(tree,parentId,fromIdx,toIdx){
+  return updateNodeTree(tree,parentId,n=>{
+    const ch=[...(n.children||[])];
+    const [item]=ch.splice(fromIdx,1);
+    ch.splice(toIdx,0,item);
+    return{...n,children:ch};
+  });
+}
+function cloneSubtree(node){
+  const idMap={};
+  function clone(n){
+    const newId=uid(); idMap[n.id]=newId;
+    if(n.type==="entry") return{...n,id:newId};
+    return{...n,id:newId,children:(n.children||[]).map(clone)};
+  }
+  return[clone(node),idMap];
+}
+
+const Ctx = createContext(null);
+const useApp = () => useContext(Ctx);
+
+// ════════════════════════════════════════════════════════════════════════════
+// CSS
+// ════════════════════════════════════════════════════════════════════════════
+const CSS = `
+@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;600;700&family=IBM+Plex+Mono:wght@400;500&family=Lora:ital,wght@0,400;0,600;1,400&display=swap');
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+:root{
+  --bg:#0d1117;--bg2:#161b22;--bg3:#1c2230;--bg4:#21283a;
+  --border:#2d3748;--amber:#d4a017;--amber2:#f0c040;--amber-dim:rgba(212,160,23,0.12);
+  --text:#e8dcc8;--text2:#a09880;--text3:#6b7280;--red:#e05c5c;--radius:6px;
+}
+:root.light{
+  --bg:#f5f0e8;--bg2:#fffdf7;--bg3:#ede8dc;--bg4:#e0daca;
+  --border:#c9c0aa;--amber:#b8860b;--amber2:#8b6914;--amber-dim:rgba(184,134,11,0.12);
+  --text:#2c2416;--text2:#5a4e38;--text3:#8a7a60;--red:#c0392b;
+}
+body{background:var(--bg);color:var(--text);font-family:'Lora',serif;}
+#app{display:flex;height:100vh;overflow:hidden;}
+.sidebar{width:270px;min-width:200px;background:var(--bg2);border-right:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden;}
+.sidebar-header{padding:14px;border-bottom:1px solid var(--border);background:var(--bg3);}
+.sidebar-title{font-family:'Playfair Display',serif;font-size:17px;color:var(--amber);margin-bottom:10px;}
+.user-row{display:flex;align-items:center;gap:8px;padding:6px 0 2px;}
+.user-avatar{width:26px;height:26px;border-radius:50%;border:1px solid var(--border);}
+.user-name{font-size:11px;color:var(--text2);font-family:'IBM Plex Mono',monospace;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.signout-btn{background:none;border:1px solid var(--border);border-radius:4px;color:var(--text3);font-size:10px;font-family:'IBM Plex Mono',monospace;padding:2px 7px;cursor:pointer;}
+.signout-btn:hover{border-color:var(--red);color:var(--red);}
+.search-wrap{position:relative;}
+.search-input{width:100%;background:var(--bg4);border:1px solid var(--border);border-radius:var(--radius);padding:7px 10px 7px 30px;color:var(--text);font-size:13px;font-family:'IBM Plex Mono',monospace;outline:none;transition:border-color .2s;}
+.search-input:focus{border-color:var(--amber);}
+.search-icon{position:absolute;left:9px;top:50%;transform:translateY(-50%);color:var(--text3);font-size:12px;}
+.tree-scroll{flex:1;overflow-y:auto;padding:6px 0;}
+.tree-scroll::-webkit-scrollbar{width:3px;}
+.tree-scroll::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px;}
+.tree-row{display:flex;align-items:center;gap:4px;padding:5px 8px;cursor:pointer;border-radius:var(--radius);transition:background .15s;}
+.tree-row:hover{background:var(--bg4);}
+.tree-row.active{background:var(--amber-dim);}
+.tree-row.active .tree-label{color:var(--amber2);}
+.tree-toggle{width:16px;height:16px;display:flex;align-items:center;justify-content:center;color:var(--text3);font-size:10px;flex-shrink:0;}
+.tree-icon{font-size:13px;flex-shrink:0;}
+.tree-label{font-size:13px;color:var(--text);flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.tree-actions{display:flex;gap:2px;}
+.tree-btn{background:none;border:none;cursor:pointer;padding:2px 4px;border-radius:3px;color:var(--text3);font-size:11px;}
+.tree-btn:hover{background:var(--border);color:var(--text);}
+.tree-btn.del:hover{color:var(--red);}
+.sidebar-footer{padding:10px;border-top:1px solid var(--border);display:flex;gap:6px;}
+.compare-bar{padding:8px 10px;background:var(--amber-dim);border-top:1px solid var(--amber);font-size:12px;font-family:'IBM Plex Mono',monospace;color:var(--amber2);display:flex;align-items:center;justify-content:space-between;}
+.main{flex:1;display:flex;flex-direction:column;overflow:hidden;}
+.topbar{display:flex;align-items:center;gap:10px;padding:11px 18px;border-bottom:1px solid var(--border);background:var(--bg2);}
+.topbar-title{font-family:'Playfair Display',serif;font-size:21px;color:var(--text);flex:1;}
+.topbar-title input{background:none;border:none;outline:none;font-family:'Playfair Display',serif;font-size:21px;color:var(--text);width:100%;}
+.content{flex:1;overflow-y:auto;padding:20px 24px;}
+.content::-webkit-scrollbar{width:4px;}
+.content::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px;}
+.btn{border-radius:var(--radius);font-family:'IBM Plex Mono',monospace;font-size:12px;padding:6px 14px;cursor:pointer;border:1px solid transparent;transition:all .15s;}
+.btn-sm{padding:5px 10px;font-size:11px;}
+.btn-ghost{background:none;border-color:var(--border);color:var(--text2);}
+.btn-ghost:hover{border-color:var(--amber);color:var(--amber);}
+.btn-amber{background:var(--amber);color:var(--bg);border-color:var(--amber);}
+.btn-amber:hover{background:var(--amber2);}
+.breadcrumb{font-size:12px;font-family:'IBM Plex Mono',monospace;color:var(--text3);margin-bottom:14px;display:flex;flex-wrap:wrap;gap:4px;}
+.breadcrumb span{cursor:pointer;}.breadcrumb span:hover{color:var(--amber);}
+.empty{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:60px 20px;gap:12px;}
+.empty-icon{font-size:40px;opacity:.4;}
+.empty p{font-size:14px;color:var(--text3);text-align:center;line-height:1.7;}
+.folder-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px;}
+.folder-card{background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:18px 14px;cursor:pointer;transition:all .2s;text-align:center;}
+.folder-card:hover{border-color:var(--amber);background:var(--bg3);}
+.entry-grid{display:flex;flex-direction:column;gap:14px;}
+.field-row{display:flex;gap:0;align-items:flex-start;}
+.field-add-col{width:38px;flex-shrink:0;display:flex;flex-direction:column;align-items:center;padding-top:8px;position:relative;}
+.field-add-btn{background:none;border:1px solid var(--border);border-radius:50%;width:24px;height:24px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--text3);font-size:14px;transition:all .15s;}
+.field-add-btn:hover{border-color:var(--amber);color:var(--amber);}
+.block-picker{position:absolute;left:30px;top:0;background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:8px;z-index:50;width:160px;box-shadow:0 4px 20px rgba(0,0,0,.4);}
+.block-picker-title{font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--text3);letter-spacing:.1em;padding:2px 6px 6px;}
+.block-picker-btn{display:flex;align-items:center;gap:8px;width:100%;background:none;border:none;cursor:pointer;padding:6px 8px;border-radius:4px;color:var(--text);font-size:13px;font-family:'Lora',serif;}
+.block-picker-btn:hover{background:var(--bg4);}
+.block-picker-icon{width:20px;text-align:center;color:var(--amber);font-size:12px;}
+.field-card{flex:1;background:var(--bg2);border:1px solid var(--border);border-radius:10px;overflow:hidden;}
+.field-card-header{display:flex;align-items:center;justify-content:space-between;padding:8px 14px;background:var(--bg3);border-bottom:1px solid var(--border);}
+.field-card-title{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--amber2);letter-spacing:.08em;font-weight:500;}
+.field-card-body{padding:10px 14px;display:flex;flex-direction:column;gap:8px;}
+.block-wrap{background:var(--bg3);border:1px solid var(--border);border-radius:8px;overflow:hidden;}
+.block-header{display:flex;align-items:center;padding:5px 10px;background:var(--bg4);border-bottom:1px solid var(--border);}
+.block-badge{font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--text3);letter-spacing:.05em;}
+.block-body{padding:8px 10px;}
+.block-textarea{width:100%;background:none;border:none;outline:none;color:var(--text);font-family:'Lora',serif;font-size:14px;line-height:1.7;resize:none;min-height:80px;}
+.list-row{display:flex;align-items:center;gap:6px;margin-bottom:3px;}
+.list-prefix{font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--amber);min-width:20px;text-align:right;flex-shrink:0;}
+.list-input{flex:1;background:none;border:none;outline:none;color:var(--text);font-family:'Lora',serif;font-size:14px;padding:2px 0;}
+.list-del{background:none;border:none;cursor:pointer;color:var(--text3);font-size:11px;padding:2px;}
+.list-del:hover{color:var(--red);}
+.add-item-btn{background:none;border:1px dashed var(--border);border-radius:4px;color:var(--text3);font-size:12px;font-family:'IBM Plex Mono',monospace;padding:4px 10px;cursor:pointer;text-align:left;transition:all .15s;margin-top:2px;}
+.add-item-btn:hover{border-color:var(--amber);color:var(--amber);}
+.image-upload-area{border:2px dashed var(--border);border-radius:8px;padding:18px 12px;display:flex;flex-direction:column;align-items:center;gap:8px;width:100%;text-align:center;}
+.table-block{overflow-x:auto;padding:4px 0;}
+.table-block table{border-collapse:collapse;width:100%;}
+.table-block th,.table-block td{border:1px solid var(--border);padding:0;}
+.table-block th{background:var(--bg3);}
+.table-cell-input{width:100%;background:none;border:none;outline:none;padding:7px 9px;color:var(--text);font-size:13px;font-family:'Lora',serif;min-width:80px;}
+.table-header-input{width:100%;background:none;border:none;outline:none;padding:7px 9px;color:var(--amber2);font-size:11px;font-family:'IBM Plex Mono',monospace;letter-spacing:.05em;}
+.table-footer{display:flex;gap:6px;margin-top:5px;}
+.table-add-btn{background:none;border:1px dashed var(--border);border-radius:4px;color:var(--text3);cursor:pointer;font-size:11px;padding:3px 10px;font-family:'IBM Plex Mono',monospace;transition:all .15s;}
+.table-add-btn:hover{border-color:var(--amber);color:var(--amber);}
+.table-del-col{background:none;border:none;color:var(--border);cursor:pointer;font-size:9px;padding:2px 4px;width:100%;}
+.table-del-col:hover{color:var(--red);}
+.tags-row{display:flex;flex-wrap:wrap;gap:6px;align-items:center;}
+.tag{background:var(--bg4);border:1px solid var(--border);border-radius:20px;padding:2px 10px;font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text2);display:flex;align-items:center;gap:4px;}
+.tag button{background:none;border:none;cursor:pointer;color:var(--text3);font-size:10px;padding:0;}
+.tag button:hover{color:var(--red);}
+.search-results{display:flex;flex-direction:column;gap:6px;}
+.search-result{background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:10px 14px;cursor:pointer;transition:all .15s;}
+.search-result:hover{border-color:var(--amber);}
+.filter-tag{background:var(--bg4);border:1px solid var(--border);border-radius:20px;padding:3px 11px;font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3);cursor:pointer;transition:all .15s;}
+.filter-tag:hover,.filter-tag.active{border-color:var(--amber);color:var(--amber);background:var(--amber-dim);}
+.entry-select-check{accent-color:var(--amber);width:15px;height:15px;cursor:pointer;}
+.compare-table-wrap{overflow-x:auto;}
+.compare-table{width:100%;border-collapse:collapse;font-size:13px;}
+.compare-table th,.compare-table td{border:1px solid var(--border);padding:9px 13px;vertical-align:top;text-align:left;}
+.compare-table th{background:var(--bg3);font-family:'Playfair Display',serif;font-size:13px;color:var(--amber);}
+.compare-table td:first-child{background:var(--bg3);font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text2);}
+.trash-item{display:flex;align-items:center;gap:12px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin-bottom:8px;}
+.trash-item-info{flex:1;min-width:0;}
+.trash-item-name{font-size:14px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.trash-item-meta{font-size:11px;color:var(--text3);font-family:'IBM Plex Mono',monospace;margin-top:3px;}
+.trash-actions{display:flex;gap:6px;flex-shrink:0;}
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.75);display:flex;align-items:center;justify-content:center;z-index:200;}
+.modal{background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:22px;min-width:320px;max-width:90vw;box-shadow:0 4px 30px rgba(0,0,0,.5);}
+.modal h3{font-family:'Playfair Display',serif;font-size:17px;color:var(--amber);margin-bottom:13px;}
+.modal input,.modal select{width:100%;background:var(--bg4);border:1px solid var(--border);border-radius:var(--radius);padding:8px 11px;color:var(--text);font-size:13px;font-family:'Lora',serif;outline:none;margin-bottom:11px;}
+.modal input:focus,.modal select:focus{border-color:var(--amber);}
+.modal-btns{display:flex;gap:7px;justify-content:flex-end;}
+.folder-picker{max-height:260px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;margin-bottom:12px;}
+.fp-row{display:flex;align-items:center;gap:6px;padding:8px 12px;cursor:pointer;font-size:13px;color:var(--text);}
+.fp-row:hover{background:var(--bg4);}
+.fp-row.selected{background:var(--amber-dim);color:var(--amber2);}
+.fade-in{animation:fadeIn .2s ease;}
+@keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+.save-indicator{position:fixed;bottom:16px;right:16px;background:var(--bg2);border:1px solid var(--border);border-radius:6px;padding:6px 12px;font-size:11px;font-family:'IBM Plex Mono',monospace;color:var(--text3);z-index:100;transition:opacity .3s;}
+`;
+
+// ════════════════════════════════════════════════════════════════════════════
+// MIND MAP (abbreviated — full version preserved)
+// ════════════════════════════════════════════════════════════════════════════
+function MindMap({block,onUpdate}){
+  const mm=block.mindmap||{center:"Topic",nodes:[],layout:"radial"};
+  const W=520,H=320,cx=W/2,cy=H/2;
+  const [editing,setEditing]=useState(null);
+  const [editVal,setEditVal]=useState("");
+  const svgRef=useRef();
+  const [pan,setPan]=useState({x:0,y:0});
+  const [zoom,setZoom]=useState(1);
+  const panRef=useRef(null);
+
+  const saveEdit=()=>{
+    if(editing==="center"){onUpdate({...block,mindmap:{...mm,center:editVal}});}
+    else{const nodes=mm.nodes.map(n=>n.id===editing?{...n,text:editVal}:n);onUpdate({...block,mindmap:{...mm,nodes}});}
+    setEditing(null);
+  };
+
+  const positions=(nodes,layout)=>{
+    const pos={};
+    if(layout==="radial"){
+      const roots=nodes.filter(n=>!n.parent);
+      roots.forEach((n,i)=>{const a=(2*Math.PI*i/roots.length)-Math.PI/2;pos[n.id]={x:cx+120*Math.cos(a),y:cy+90*Math.sin(a)};});
+      const walk=(pid,depth)=>{const ch=nodes.filter(n=>n.parent===pid);ch.forEach((n,i)=>{const pa=pos[pid]||{x:cx,y:cy};const a=Math.atan2(pa.y-cy,pa.x-cx)+(i-ch.length/2)*0.5;const r=80+depth*60;pos[n.id]={x:pa.x+r*Math.cos(a),y:pa.y+r*Math.sin(a)};walk(n.id,depth+1);});};
+      roots.forEach(n=>walk(n.id,1));
+    }else if(layout==="tree"){
+      const roots=nodes.filter(n=>!n.parent);const cols={};
+      const assign=(pid,col,row)=>{const ch=nodes.filter(n=>n.parent===pid);ch.forEach((n,i)=>{pos[n.id]={x:100+col*130,y:40+row*60};assign(n.id,col+1,row+i);});return ch.length;};
+      let r=0;roots.forEach(n=>{pos[n.id]={x:100,y:40+r*60};r+=assign(n.id,1,r)+1;});
+    }else if(layout==="circle"){
+      nodes.forEach((n,i)=>{const a=(2*Math.PI*i/nodes.length)-Math.PI/2;pos[n.id]={x:cx+140*Math.cos(a),y:cy+100*Math.sin(a)};});
+    }else{
+      nodes.forEach((n,i)=>{pos[n.id]={x:80+(i%4)*110,y:60+Math.floor(i/4)*70};});
+    }
+    return pos;
+  };
+
+  const pos=positions(mm.nodes,mm.layout);
+  const addNode=()=>{const id=uid();onUpdate({...block,mindmap:{...mm,nodes:[...mm.nodes,{id,text:"Node",parent:null}]}});};
+  const delNode=id=>onUpdate({...block,mindmap:{...mm,nodes:mm.nodes.filter(n=>n.id!==id&&n.parent!==id)}});
+  const layouts=["radial","tree","circle","grid"];
+
+  return(<div style={{border:"1px solid var(--border)",borderRadius:8,overflow:"hidden",background:"var(--bg3)"}}>
+    <div style={{display:"flex",gap:6,padding:"6px 10px",background:"var(--bg4)",borderBottom:"1px solid var(--border)",flexWrap:"wrap"}}>
+      {layouts.map(l=><button key={l} onClick={()=>onUpdate({...block,mindmap:{...mm,layout:l}})}
+        style={{fontSize:10,fontFamily:"IBM Plex Mono,monospace",padding:"2px 8px",border:`1px solid ${mm.layout===l?"var(--amber)":"var(--border)"}`,
+        borderRadius:3,background:mm.layout===l?"var(--amber-dim)":"none",color:mm.layout===l?"var(--amber)":"var(--text3)",cursor:"pointer"}}>{l}</button>)}
+      <button onClick={addNode} style={{fontSize:10,fontFamily:"IBM Plex Mono,monospace",padding:"2px 8px",border:"1px solid var(--border)",borderRadius:3,background:"none",color:"var(--text3)",cursor:"pointer",marginLeft:"auto"}}>+ node</button>
+    </div>
+    <svg ref={svgRef} width="100%" viewBox={`0 0 ${W} ${H}`} style={{display:"block",cursor:"grab",minHeight:180}}>
+      <g transform={`translate(${pan.x},${pan.y}) scale(${zoom})`}>
+        {mm.nodes.map(n=>{const p=n.parent?pos[n.parent]:null;const np=pos[n.id];if(!np)return null;return p?<line key={`l${n.id}`} x1={cx} y1={cy} x2={np.x} y2={np.y} stroke="var(--border)" strokeWidth="1.5"/>:null;})}
+        {mm.nodes.map(n=>{const np=pos[n.id];if(!np)return null;return(<g key={n.id}>
+          <line x1={cx} y1={cy} x2={np.x} y2={np.y} stroke="var(--border)" strokeWidth="1.5"/>
+          <circle cx={np.x} cy={np.y} r={24} fill="var(--bg4)" stroke="var(--amber)" strokeWidth="1.5" style={{cursor:"pointer"}} onDoubleClick={()=>{setEditing(n.id);setEditVal(n.text);}}/>
+          {editing===n.id
+            ?<foreignObject x={np.x-30} y={np.y-10} width={60} height={20}>
+              <input value={editVal} onChange={e=>setEditVal(e.target.value)} onBlur={saveEdit} onKeyDown={e=>e.key==="Enter"&&saveEdit()} autoFocus style={{width:"100%",background:"var(--bg)",border:"1px solid var(--amber)",borderRadius:3,color:"var(--text)",fontSize:10,textAlign:"center",outline:"none"}}/>
+            </foreignObject>
+            :<text x={np.x} y={np.y+4} textAnchor="middle" fill="var(--text)" fontSize={10} style={{pointerEvents:"none",userSelect:"none"}}>{n.text}</text>}
+          <text x={np.x+18} y={np.y-18} fill="var(--red)" fontSize={12} style={{cursor:"pointer"}} onClick={()=>delNode(n.id)}>×</text>
+        </g>);})}
+        <circle cx={cx} cy={cy} r={34} fill="var(--amber-dim)" stroke="var(--amber)" strokeWidth={2} style={{cursor:"pointer"}} onDoubleClick={()=>{setEditing("center");setEditVal(mm.center);}}/>
+        {editing==="center"
+          ?<foreignObject x={cx-36} y={cy-10} width={72} height={20}>
+            <input value={editVal} onChange={e=>setEditVal(e.target.value)} onBlur={saveEdit} onKeyDown={e=>e.key==="Enter"&&saveEdit()} autoFocus style={{width:"100%",background:"var(--bg)",border:"1px solid var(--amber)",borderRadius:3,color:"var(--amber)",fontSize:11,textAlign:"center",outline:"none"}}/>
+          </foreignObject>
+          :<text x={cx} y={cy+4} textAnchor="middle" fill="var(--amber)" fontSize={11} fontWeight="bold" style={{pointerEvents:"none",userSelect:"none"}}>{mm.center}</text>}
+      </g>
+    </svg>
+  </div>);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// BLOCKS
+// ════════════════════════════════════════════════════════════════════════════
+function ListRow({item,index,type,onChange,onDelete,onEnter}){
+  return(<div className="list-row">
+    {type==="check"
+      ?<input type="checkbox" className="entry-select-check" checked={item.checked} onChange={e=>onChange({...item,checked:e.target.checked})}/>
+      :<span className="list-prefix">{getPrefix(type,index)}</span>}
+    <input className="list-input" value={item.text} placeholder="Item…"
+      style={{textDecoration:type==="check"&&item.checked?"line-through":"none",color:type==="check"&&item.checked?"var(--text3)":"var(--text)"}}
+      onChange={e=>onChange({...item,text:e.target.value})}
+      onKeyDown={e=>{if(e.key==="Enter")onEnter();}}/>
+    <button className="list-del" onClick={onDelete}>✕</button>
+  </div>);
+}
+
+function ListBlock({block,onUpdate}){
+  const [items,setItems]=useState(()=>Array.isArray(block.content)?block.content:[]);
+  const prevId=useRef(block.id);
+  useEffect(()=>{if(prevId.current!==block.id){setItems(Array.isArray(block.content)?block.content:[]);prevId.current=block.id;}},[block.id]);
+  const commit=next=>{setItems(next);onUpdate({...block,content:next});};
+  return(<div className="block-body">
+    {items.map((item,i)=><ListRow key={item.id} item={item} index={i} type={block.type}
+      onChange={u=>commit(items.map(x=>x.id===item.id?u:x))}
+      onDelete={()=>commit(items.filter(x=>x.id!==item.id))}
+      onEnter={()=>commit([...items,makeListItem()])}/>)}
+    <button className="add-item-btn" onClick={()=>commit([...items,makeListItem()])}>+ add item</button>
+  </div>);
+}
+
+function TextBlock({block,onUpdate}){
+  const [val,setVal]=useState(block.content||"");
+  const prevId=useRef(block.id);
+  const saveTimer=useRef(null);
+  useEffect(()=>{if(prevId.current!==block.id){setVal(block.content||"");prevId.current=block.id;}},[block.id]);
+  const handleChange=e=>{
+    const v=e.target.value; setVal(v);
+    clearTimeout(saveTimer.current);
+    saveTimer.current=setTimeout(()=>onUpdate({...block,content:v}),300);
+  };
+  return(<div className="block-body"><textarea className="block-textarea" value={val} placeholder="Type here…" onChange={handleChange} onBlur={()=>onUpdate({...block,content:val})}/></div>);
+}
+
+function ImageBlock({block,onUpdate}){
+  const [urlInput,setUrlInput]=useState("");
+  const [showUrl,setShowUrl]=useState(false);
+  const [dragging,setDragging]=useState(false);
+  const [error,setError]=useState(false);
+
+  const readFile=file=>{
+    if(!file||!file.type.startsWith("image/"))return;
+    const reader=new FileReader();
+    reader.onload=ev=>onUpdate({...block,content:ev.target.result,fileName:file.name});
+    reader.readAsDataURL(file);
+  };
+
+  const applyUrl=()=>{
+    if(!urlInput.trim())return;
+    onUpdate({...block,content:urlInput.trim(),fileName:""});
+    setUrlInput("");setShowUrl(false);
+  };
+
+  if(block.content){
+    return(<div className="block-body" style={{padding:10}}>
+      <img src={block.content} alt={block.fileName||"image"} onError={()=>setError(true)} onLoad={()=>setError(false)}
+        style={{maxWidth:"100%",maxHeight:320,borderRadius:6,objectFit:"contain",display:"block"}}/>
+      {error&&<div style={{fontSize:12,color:"var(--red)",fontFamily:"IBM Plex Mono,monospace",marginTop:6}}>⚠ Could not load image.</div>}
+      <button onClick={()=>onUpdate({...block,content:null,fileName:null})}
+        style={{marginTop:8,fontSize:11,fontFamily:"IBM Plex Mono,monospace",background:"none",border:"1px solid var(--border)",color:"var(--text3)",borderRadius:4,padding:"4px 12px",cursor:"pointer"}}>
+        🔄 Change image
+      </button>
+    </div>);
+  }
+
+  return(<div className="block-body" style={{padding:12,display:"flex",flexDirection:"column",gap:10}}>
+    <div onDragOver={e=>{e.preventDefault();setDragging(true);}} onDragLeave={()=>setDragging(false)}
+      onDrop={e=>{e.preventDefault();setDragging(false);readFile(e.dataTransfer.files?.[0]);}}
+      style={{border:`2px dashed ${dragging?"var(--amber)":"var(--border)"}`,borderRadius:8,padding:"18px 12px",
+        background:dragging?"var(--amber-dim)":"transparent",transition:"all .2s",textAlign:"center"}}>
+      <div style={{fontSize:26,marginBottom:6}}>🖼️</div>
+      <div style={{fontSize:13,color:"var(--text)",marginBottom:12}}>Pick or drop an image</div>
+      <input type="file" accept="image/*" onChange={e=>readFile(e.target.files?.[0])}
+        style={{display:"block",width:"100%",fontSize:13,color:"var(--text)",fontFamily:"IBM Plex Mono,monospace",cursor:"pointer"}}/>
+    </div>
+    {!showUrl
+      ?<button onClick={()=>setShowUrl(true)} style={{fontSize:12,fontFamily:"IBM Plex Mono,monospace",background:"none",border:"1px solid var(--border)",color:"var(--text3)",borderRadius:4,padding:"6px 12px",cursor:"pointer"}}>
+          🔗 Use image URL instead
+        </button>
+      :<div style={{display:"flex",flexDirection:"column",gap:6}}>
+        <input value={urlInput} onChange={e=>setUrlInput(e.target.value)} onKeyDown={e=>e.key==="Enter"&&applyUrl()}
+          placeholder="https://example.com/image.jpg"
+          style={{background:"var(--bg4)",border:"1px solid var(--border)",borderRadius:4,padding:"8px 10px",color:"var(--text)",fontSize:13,outline:"none",width:"100%"}}/>
+        <div style={{display:"flex",gap:6}}>
+          <button onClick={applyUrl} style={{flex:1,background:"var(--amber)",color:"var(--bg)",border:"none",borderRadius:4,padding:"7px",fontSize:12,fontFamily:"IBM Plex Mono,monospace",cursor:"pointer"}}>Add Image</button>
+          <button onClick={()=>setShowUrl(false)} style={{background:"none",border:"1px solid var(--border)",color:"var(--text3)",borderRadius:4,padding:"7px 12px",fontSize:12,fontFamily:"IBM Plex Mono,monospace",cursor:"pointer"}}>Cancel</button>
+        </div>
+      </div>}
+  </div>);
+}
+
+function TableBlock({block,onUpdate}){
+  const tbl=block.content||{headers:["Column 1","Column 2"],rows:[["",""]]};
+  const setTbl=next=>onUpdate({...block,content:next});
+  const setHeader=(i,v)=>{const h=[...tbl.headers];h[i]=v;setTbl({...tbl,headers:h});};
+  const setCell=(r,c,v)=>{const rows=tbl.rows.map(row=>[...row]);rows[r][c]=v;setTbl({...tbl,rows});};
+  const addRow=()=>setTbl({...tbl,rows:[...tbl.rows,tbl.headers.map(()=>"")]});
+  const addCol=()=>setTbl({...tbl,headers:[...tbl.headers,`Column ${tbl.headers.length+1}`],rows:tbl.rows.map(r=>[...r,""])});
+  const delRow=i=>setTbl({...tbl,rows:tbl.rows.filter((_,ri)=>ri!==i)});
+  const delCol=i=>setTbl({...tbl,headers:tbl.headers.filter((_,ci)=>ci!==i),rows:tbl.rows.map(r=>r.filter((_,ci)=>ci!==i))});
+  return(<div className="block-body table-block">
+    <div style={{overflowX:"auto"}}>
+      <table>
+        <thead><tr>
+          <th style={{width:28,background:"var(--bg3)",border:"1px solid var(--border)"}}></th>
+          {tbl.headers.map((h,i)=><th key={i}><div style={{display:"flex",flexDirection:"column"}}>
+            <input className="table-header-input" value={h} onChange={e=>setHeader(i,e.target.value)} placeholder={`Col ${i+1}`}/>
+            {tbl.headers.length>1&&<button className="table-del-col" onClick={()=>delCol(i)}>✕ col</button>}
+          </div></th>)}
+        </tr></thead>
+        <tbody>{tbl.rows.map((row,ri)=><tr key={ri}>
+          <td style={{background:"var(--bg3)",border:"1px solid var(--border)",textAlign:"center",minWidth:32}}>
+            <button onClick={()=>delRow(ri)} style={{background:"none",border:"none",color:"var(--red)",fontSize:13,padding:"4px 8px",cursor:"pointer"}}>✕</button>
+          </td>
+          {row.map((cell,ci)=><td key={ci}><input className="table-cell-input" value={cell} onChange={e=>setCell(ri,ci,e.target.value)} placeholder="…"/></td>)}
+        </tr>)}</tbody>
+      </table>
+    </div>
+    <div className="table-footer">
+      <button className="table-add-btn" onClick={addRow}>+ Row</button>
+      <button className="table-add-btn" onClick={addCol}>+ Column</button>
+    </div>
+  </div>);
+}
+
+function Block({block,onUpdate,onDelete}){
+  const meta=BLOCK_TYPES.find(b=>b.type===block.type);
+  return(<div className="block-wrap">
+    <div className="block-header">
+      <span className="block-badge">{meta?.icon} {meta?.label}</span>
+      <div style={{flex:1}}/>
+      <button style={{background:"none",border:"none",cursor:"pointer",color:"var(--text3)",fontSize:12,padding:"2px 6px"}} onClick={onDelete}>✕</button>
+    </div>
+    {block.type==="text"    &&<TextBlock block={block} onUpdate={onUpdate}/>}
+    {block.type==="mindmap" &&<MindMap   block={block} onUpdate={onUpdate}/>}
+    {block.type==="image"   &&<ImageBlock block={block} onUpdate={onUpdate}/>}
+    {block.type==="table"   &&<TableBlock block={block} onUpdate={onUpdate}/>}
+    {!["text","mindmap","image","table"].includes(block.type)&&<ListBlock block={block} onUpdate={onUpdate}/>}
+  </div>);
+}
+
+function FieldSection({entryId,col,initialBlocks,onSave,onRemoveCol,onRenameCol}){
+  const [blocks,setBlocks]=useState(initialBlocks||[]);
+  const [pickerOpen,setPicker]=useState(false);
+  const [editingTitle,setEditingTitle]=useState(false);
+  const [titleVal,setTitleVal]=useState(col);
+  const titleInputRef=useRef();
+  const prevKey=useRef(`${entryId}::${col}`);
+  const pickerRef=useRef();
+  const history=useRef([]);
+  const MAX_HISTORY=30;
+
+  useEffect(()=>{const k=`${entryId}::${col}`;if(prevKey.current!==k){setBlocks(initialBlocks||[]);history.current=[];prevKey.current=k;}},[entryId,col]);
+  useEffect(()=>{if(!pickerOpen)return;const h=e=>{if(pickerRef.current&&!pickerRef.current.contains(e.target))setPicker(false);};document.addEventListener("mousedown",h);return()=>document.removeEventListener("mousedown",h);},[pickerOpen]);
+
+  const [canUndo,setCanUndo]=useState(false);
+  const commit=(b,pushHistory=true)=>{
+    if(pushHistory){history.current=[...history.current,blocks].slice(-MAX_HISTORY);setCanUndo(true);}
+    setBlocks(b);onSave(col,b);
+  };
+  const undo=()=>{
+    if(!history.current.length)return;
+    const prev=history.current[history.current.length-1];
+    history.current=history.current.slice(0,-1);
+    setCanUndo(history.current.length>0);
+    setBlocks(prev);onSave(col,prev);
+  };
+  const addBlock=type=>{commit([...blocks,makeBlock(type)]);setPicker(false);};
+
+  return(<div className="field-row">
+    <div className="field-add-col" ref={pickerRef}>
+      <button className="field-add-btn" onClick={()=>setPicker(o=>!o)} title="Add block">+</button>
+      {pickerOpen&&<div className="block-picker">
+        <div className="block-picker-title">ADD BLOCK</div>
+        {BLOCK_TYPES.map(bt=><button key={bt.type} className="block-picker-btn" onMouseDown={e=>{e.preventDefault();addBlock(bt.type);}}><span className="block-picker-icon">{bt.icon}</span>{bt.label}</button>)}
+      </div>}
+    </div>
+    <div className="field-card">
+      <div className="field-card-header">
+        {editingTitle
+          ?<input ref={titleInputRef} value={titleVal}
+              style={{background:"var(--bg4)",border:"1px solid var(--amber)",borderRadius:4,padding:"2px 8px",color:"var(--amber2)",fontSize:11,fontFamily:"IBM Plex Mono,monospace",outline:"none",width:"100%",maxWidth:180}}
+              onChange={e=>setTitleVal(e.target.value)}
+              onBlur={()=>{setEditingTitle(false);onRenameCol(titleVal);}}
+              onKeyDown={e=>{if(e.key==="Enter"){setEditingTitle(false);onRenameCol(titleVal);}if(e.key==="Escape"){setEditingTitle(false);setTitleVal(col);}}}/>
+          :<span className="field-card-title" style={{cursor:"pointer"}} onClick={()=>{setTitleVal(col);setEditingTitle(true);setTimeout(()=>titleInputRef.current?.focus(),50);}}>{col}</span>}
+        <div style={{display:"flex",gap:4,alignItems:"center"}}>
+          {canUndo&&<button className="tree-btn" onClick={undo} style={{fontSize:13,color:"var(--amber)"}}>↩ undo</button>}
+          <button className="tree-btn del" onClick={onRemoveCol} style={{fontSize:11}}>✕ col</button>
+        </div>
+      </div>
+      <div className="field-card-body">
+        {blocks.map(block=><Block key={block.id} block={block}
+          onUpdate={upd=>commit(blocks.map(b=>b.id===block.id?upd:b))}
+          onDelete={()=>commit(blocks.filter(b=>b.id!==block.id))}/>)}
+      </div>
+    </div>
+  </div>);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// VIEWS
+// ════════════════════════════════════════════════════════════════════════════
+function TagRow({entryId}){
+  const {data,update}=useApp();
+  const entry=data.entries[entryId];
+  const [tagInput,setTagInput]=useState("");
+  const addTag=()=>{const t=tagInput.trim().toLowerCase();if(!t||entry.tags?.includes(t))return;update(prev=>({...prev,entries:{...prev.entries,[entryId]:{...prev.entries[entryId],tags:[...(prev.entries[entryId].tags||[]),t]}}}));setTagInput("");};
+  const removeTag=t=>update(prev=>({...prev,entries:{...prev.entries,[entryId]:{...prev.entries[entryId],tags:prev.entries[entryId].tags.filter(x=>x!==t)}}}));
+  return(<div style={{background:"var(--bg2)",border:"1px solid var(--border)",borderRadius:8,padding:"10px 14px"}}>
+    <div style={{fontSize:11,color:"var(--text3)",fontFamily:"IBM Plex Mono,monospace",marginBottom:7}}>TAGS</div>
+    <div className="tags-row">
+      {entry.tags?.map(t=><span key={t} className="tag">{t}<button onClick={()=>removeTag(t)}>✕</button></span>)}
+      <div style={{display:"flex",gap:6}}>
+        <input style={{background:"var(--bg4)",border:"1px solid var(--border)",borderRadius:4,padding:"3px 8px",color:"var(--text)",fontSize:12,fontFamily:"IBM Plex Mono,monospace",outline:"none",width:110}}
+          placeholder="add tag…" value={tagInput} onChange={e=>setTagInput(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")addTag();}}/>
+        <button className="btn btn-ghost btn-sm" onClick={addTag}>+</button>
+      </div>
+    </div>
+  </div>);
+}
+
+function EntryView({entryId}){
+  const {data,update,setModal,setActiveId,setView}=useApp();
+  const entry=data.entries[entryId];
+  const [colConfirm,setColConfirm]=useState(null);
+  const [deletedCol,setDeletedCol]=useState(null);
+  const undoTimer=useRef(null);
+
+  if(!entry)return <div className="empty"><div className="empty-icon">🔍</div><p>Entry not found.</p></div>;
+
+  const saveField=useCallback((col,blocks)=>{update(prev=>({...prev,entries:{...prev.entries,[entryId]:{...prev.entries[entryId],fields:{...prev.entries[entryId].fields,[col]:blocks}}}}));},[entryId,update]);
+
+  const removeCol=col=>{
+    const snapshot={col,index:data.globalColumns.indexOf(col),allFields:Object.fromEntries(Object.entries(data.entries).map(([id,e])=>[id,e.fields?.[col]||[]]))};
+    update(prev=>({...prev,globalColumns:prev.globalColumns.filter(c=>c!==col),entries:Object.fromEntries(Object.entries(prev.entries).map(([id,e])=>{const f={...e.fields};delete f[col];return[id,{...e,fields:f}];}))}));
+    setDeletedCol(snapshot);
+    clearTimeout(undoTimer.current);
+    undoTimer.current=setTimeout(()=>setDeletedCol(null),8000);
+  };
+
+  const undoRemoveCol=()=>{
+    if(!deletedCol)return;
+    clearTimeout(undoTimer.current);
+    update(prev=>{
+      const cols=[...prev.globalColumns];cols.splice(deletedCol.index,0,deletedCol.col);
+      const entries=Object.fromEntries(Object.entries(prev.entries).map(([id,e])=>[id,{...e,fields:{...e.fields,[deletedCol.col]:deletedCol.allFields[id]||[]}}]));
+      return{...prev,globalColumns:cols,entries};
+    });
+    setDeletedCol(null);
+  };
+
+  const renameCol=(oldCol,newCol)=>{
+    if(!newCol.trim()||newCol===oldCol)return;
+    update(prev=>({...prev,globalColumns:prev.globalColumns.map(c=>c===oldCol?newCol:c),entries:Object.fromEntries(Object.entries(prev.entries).map(([id,e])=>{const f={...e.fields};f[newCol]=f[oldCol]||[];delete f[oldCol];return[id,{...e,fields:f}];}))}));
+  };
+
+  return(<div className="entry-grid fade-in">
+    {colConfirm&&<div className="modal-overlay" onClick={()=>setColConfirm(null)}>
+      <div className="modal" onClick={e=>e.stopPropagation()} style={{maxWidth:340}}>
+        <h3>🗑 Delete Column?</h3>
+        <p style={{fontSize:14,color:"var(--text)",lineHeight:1.7,marginBottom:18}}>
+          Delete <strong style={{color:"var(--amber)"}}>{colConfirm}</strong> from all entries?
+          <span style={{display:"block",marginTop:6,fontSize:12,color:"var(--text3)"}}>You can undo immediately after.</span>
+        </p>
+        <div className="modal-btns">
+          <button className="btn btn-ghost" onClick={()=>setColConfirm(null)}>Cancel</button>
+          <button style={{background:"var(--red)",color:"#fff",border:"none",padding:"6px 16px",borderRadius:"var(--radius)",fontFamily:"IBM Plex Mono,monospace",fontSize:12,cursor:"pointer"}}
+            onClick={()=>{removeCol(colConfirm);setColConfirm(null);}}>Delete</button>
+        </div>
+      </div>
+    </div>}
+    {deletedCol&&<div style={{position:"fixed",bottom:24,left:"50%",transform:"translateX(-50%)",background:"var(--bg2)",border:"1px solid var(--amber)",borderRadius:10,padding:"12px 20px",display:"flex",alignItems:"center",gap:12,zIndex:300,boxShadow:"0 4px 20px rgba(0,0,0,.5)",whiteSpace:"nowrap"}}>
+      <span style={{fontSize:13,color:"var(--text)"}}>Column <strong style={{color:"var(--amber)"}}>{deletedCol.col}</strong> deleted</span>
+      <button className="btn btn-amber btn-sm" onClick={undoRemoveCol}>↩ Undo</button>
+    </div>}
+    <TagRow entryId={entryId}/>
+    {data.globalColumns.map(col=><FieldSection key={`${entryId}::${col}`} entryId={entryId} col={col} initialBlocks={entry.fields?.[col]||[]} onSave={saveField} onRemoveCol={()=>setColConfirm(col)} onRenameCol={(newCol)=>renameCol(col,newCol)}/>)}
+    <button className="btn btn-ghost" style={{alignSelf:"flex-start",marginLeft:38}} onClick={()=>setModal({type:"addcol"})}>+ Add Column</button>
+  </div>);
+}
+
+function FolderView({node}){
+  const {setActiveId,setView}=useApp();
+  const children=node.children||[];
+  if(!children.length)return <div className="empty"><div className="empty-icon">📂</div><p>Empty folder.<br/>Use <strong>+</strong> in the sidebar to add items.</p></div>;
+  return(<div className="folder-grid fade-in">
+    {children.map(c=>{const count=c.type==="folder"?getAllEntries(c).length:null;return(
+      <div key={c.id} className="folder-card" onClick={()=>{setActiveId(c.id);setView("node");}}>
+        <div style={{fontSize:26,marginBottom:7}}>{c.type==="folder"?"📁":"📄"}</div>
+        <div style={{fontSize:13,color:"var(--text)"}}>{c.name}</div>
+        {count!==null&&<div style={{fontSize:11,color:"var(--text3)",marginTop:3,fontFamily:"IBM Plex Mono,monospace"}}>{count} entries</div>}
+      </div>
+    );})}
+  </div>);
+}
+
+function TrashView(){
+  const {data,update}=useApp();
+  const trash=data.trash||[];
+  const [confirm,setConfirm]=useState(null);
+  const fmt=ts=>{const d=Date.now()-ts;if(d<60000)return"just now";if(d<3600000)return`${Math.floor(d/60000)}m ago`;if(d<86400000)return`${Math.floor(d/3600000)}h ago`;return new Date(ts).toLocaleDateString();};
+  const restore=item=>{
+    update(prev=>{
+      const parentId=item.parentId||"root";
+      const parentExists=findNode(prev.tree,parentId);
+      const targetId=parentExists?parentId:"root";
+      const newTree=updateNodeTree(prev.tree,targetId,n=>({...n,children:[...(n.children||[]),item.subtree]}));
+      return{...prev,tree:newTree,entries:{...prev.entries,...item.entries},trash:(prev.trash||[]).filter(x=>x.id!==item.id)};
+    });
+  };
+  const permDel=item=>setConfirm({title:"Permanently Delete?",message:<>Permanently delete <strong style={{color:"var(--amber)"}}>{item.name}</strong>?<span style={{display:"block",marginTop:6,color:"var(--red)"}}>This cannot be undone.</span></>,onConfirm:()=>update(prev=>({...prev,trash:(prev.trash||[]).filter(x=>x.id!==item.id)}))});
+  const empty=()=>setConfirm({title:"Empty Trash?",message:<>Permanently delete all <strong style={{color:"var(--amber)"}}>{trash.length} items</strong>?<span style={{display:"block",marginTop:6,color:"var(--red)"}}>This cannot be undone.</span></>,onConfirm:()=>update(prev=>({...prev,trash:[]}))});
+
+  return(<div className="fade-in">
+    {confirm&&<div className="modal-overlay" onClick={()=>setConfirm(null)}>
+      <div className="modal" onClick={e=>e.stopPropagation()} style={{maxWidth:340}}>
+        <h3>⚠️ {confirm.title}</h3>
+        <p style={{fontSize:14,color:"var(--text)",lineHeight:1.7,marginBottom:18}}>{confirm.message}</p>
+        <div className="modal-btns">
+          <button className="btn btn-ghost" onClick={()=>setConfirm(null)}>Cancel</button>
+          <button style={{background:"var(--red)",color:"#fff",border:"none",padding:"6px 16px",borderRadius:"var(--radius)",fontFamily:"IBM Plex Mono,monospace",fontSize:12,cursor:"pointer"}} onClick={()=>{confirm.onConfirm();setConfirm(null);}}>Delete Forever</button>
+        </div>
+      </div>
+    </div>}
+    <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16}}>
+      <div style={{fontFamily:"IBM Plex Mono,monospace",fontSize:11,color:"var(--text3)"}}>{trash.length===0?"Trash is empty":`${trash.length} item${trash.length!==1?"s":""} in trash`}</div>
+      {trash.length>0&&<button className="btn btn-sm" style={{background:"var(--red)",color:"#fff",border:"none"}} onClick={empty}>🗑 Empty Trash</button>}
+    </div>
+    {trash.length===0
+      ?<div className="empty"><div className="empty-icon">🗑️</div><p>Nothing in trash.</p></div>
+      :<div>{[...trash].reverse().map(item=>(
+        <div key={item.id} className="trash-item">
+          <div style={{fontSize:22,flexShrink:0}}>{item.subtree?.type==="folder"?"📁":"📄"}</div>
+          <div className="trash-item-info">
+            <div className="trash-item-name">{item.name}</div>
+            <div className="trash-item-meta">Deleted {fmt(item.deletedAt)}</div>
+          </div>
+          <div className="trash-actions">
+            <button className="btn btn-ghost btn-sm" onClick={()=>restore(item)}>↩ Restore</button>
+            <button className="btn btn-sm" style={{background:"none",border:"1px solid var(--red)",color:"var(--red)"}} onClick={()=>permDel(item)}>✕</button>
+          </div>
+        </div>
+      ))}</div>}
+  </div>);
+}
+
+function SearchView(){
+  const {data,searchQ,setActiveId,setView,setSearchQ,filterTag,setFilterTag}=useApp();
+  const tags=[...new Set(Object.values(data.entries).flatMap(e=>e.tags||[]))].sort();
+  const q=searchQ.toLowerCase(),results=[];
+  const walk=(node,path=[])=>{const p=[...path,node.name];if(node.type==="entry"){const entry=data.entries[node.id];if(node.name.toLowerCase().includes(q)||entry?.tags?.some(t=>t.toLowerCase().includes(q)))results.push({node,path:p.slice(0,-1),entry});}(node.children||[]).forEach(c=>walk(c,p));};
+  walk(data.tree);
+  const filtered=filterTag?results.filter(r=>r.entry?.tags?.includes(filterTag)):results;
+  return(<div className="fade-in">
+    <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:12,alignItems:"center"}}>
+      {tags.map(t=><span key={t} className={`filter-tag${filterTag===t?" active":""}`} onClick={()=>setFilterTag(filterTag===t?"":t)}>{t}</span>)}
+    </div>
+    {filtered.length===0
+      ?<div className="empty"><div className="empty-icon">🔍</div><p>No results for "<strong>{searchQ}</strong>"</p></div>
+      :<div className="search-results">{filtered.map(({node,path,entry})=>(
+        <div key={node.id} className="search-result" onClick={()=>{setActiveId(node.id);setView("node");setSearchQ("");}}>
+          <div style={{fontFamily:"Playfair Display,serif",fontSize:14,color:"var(--text)"}}>{node.name}</div>
+          <div style={{fontSize:11,color:"var(--text3)",fontFamily:"IBM Plex Mono,monospace",marginTop:3}}>{path.join(" › ")}</div>
+          {entry?.tags?.length>0&&<div style={{display:"flex",gap:4,marginTop:5}}>{entry.tags.map(t=><span key={t} className="tag">{t}</span>)}</div>}
+        </div>
+      ))}</div>}
+  </div>);
+}
+
+function CompareView(){
+  const {data,compareIds,setCompareIds,setShowCompare,setView}=useApp();
+  const [visCols,setVisCols]=useState(data.globalColumns);
+  const entries=compareIds.map(id=>data.entries[id]).filter(Boolean);
+  const renderBlocks=blocks=>{
+    if(!blocks||!blocks.length)return <span style={{color:"var(--text3)",fontStyle:"italic"}}>—</span>;
+    return blocks.map(b=>{
+      if(b.type==="text")return <div key={b.id} style={{marginBottom:4,fontSize:13}}>{b.content||"—"}</div>;
+      if(b.type==="mindmap")return <div key={b.id} style={{fontStyle:"italic",color:"var(--text3)",fontSize:12}}>🗺 Mind map</div>;
+      if(b.type==="image")return <div key={b.id}>{b.content&&<img src={b.content} style={{maxWidth:100,borderRadius:4}}/>}</div>;
+      return <div key={b.id}>{(b.content||[]).map((it,i)=><div key={it.id} style={{display:"flex",gap:6,fontSize:13}}>
+        <span style={{color:"var(--amber)",fontFamily:"IBM Plex Mono,monospace",minWidth:18}}>{b.type==="check"?(it.checked?"☑":"☐"):getPrefix(b.type,i)}</span>
+        <span>{it.text||"—"}</span>
+      </div>)}</div>;
+    });
+  };
+  return(<div className="fade-in">
+    <div style={{display:"flex",flexWrap:"wrap",gap:5,marginBottom:14}}>
+      {data.globalColumns.map(col=><span key={col} className={`filter-tag${visCols.includes(col)?" active":""}`} onClick={()=>setVisCols(v=>v.includes(col)?v.filter(c=>c!==col):[...v,col])}>{col}</span>)}
+    </div>
+    <div className="compare-table-wrap"><table className="compare-table">
+      <thead><tr><th>Field</th>{entries.map(e=><th key={e.id}>{e.name}</th>)}</tr></thead>
+      <tbody>{visCols.map(col=><tr key={col}><td>{col}</td>{entries.map(e=><td key={e.id}>{renderBlocks(e.fields?.[col])}</td>)}</tr>)}</tbody>
+    </table></div>
+  </div>);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// TREE NODE
+// ════════════════════════════════════════════════════════════════════════════
+function TreeNode({node,depth=0,parentId="root"}){
+  const {activeId,setActiveId,setView,setSearchQ,showCompare,compareIds,handleSelectEntry,update,setModal}=useApp();
+  const [open,setOpen]=useState(depth<2);
+  const isFolder=node.type==="folder",isActive=activeId===node.id&&!showCompare,isChecked=compareIds.includes(node.id);
+  const handleClick=()=>{if(showCompare&&!isFolder){handleSelectEntry(node.id);return;}if(isFolder)setOpen(o=>!o);setActiveId(node.id);setView("node");setSearchQ("");};
+
+  const reorder=dir=>update(prev=>{
+    const parent=findNode(prev.tree,parentId);
+    if(!parent)return prev;
+    const siblings=parent.children||[];
+    const idx=siblings.findIndex(c=>c.id===node.id);
+    if(idx<0)return prev;
+    const toIdx=idx+dir;
+    if(toIdx<0||toIdx>=siblings.length)return prev;
+    return{...prev,tree:reorderChildren(prev.tree,parentId,idx,toIdx)};
+  });
+
+  return(<div>
+    <div style={{display:"flex",alignItems:"center"}}>
+      <div className={`tree-row${isActive?" active":""}${isChecked?" active":""}`} style={{paddingLeft:8+depth*16,flex:1}} onClick={handleClick}>
+        {isFolder?<span className="tree-toggle">{open?"▾":"▸"}</span>:<span className="tree-toggle">{showCompare&&<input type="checkbox" className="entry-select-check" checked={isChecked} onChange={()=>handleSelectEntry(node.id)} onClick={e=>e.stopPropagation()}/>}</span>}
+        <span className="tree-icon">{isFolder?(open?"📂":"📁"):"📄"}</span>
+        <span className="tree-label">{node.name}</span>
+        {!showCompare&&isFolder&&<span className="tree-actions"><button className="tree-btn" onClick={e=>{e.stopPropagation();setModal({type:"add",parentId:node.id});}}>+</button></span>}
+      </div>
+      {!showCompare&&node.id!=="root"&&<div style={{display:"flex",flexDirection:"column",flexShrink:0}}>
+        <button onPointerDown={e=>{e.stopPropagation();e.preventDefault();reorder(-1);}} style={{background:"none",border:"none",cursor:"pointer",color:"var(--text3)",fontSize:9,padding:"2px 6px",lineHeight:1,touchAction:"none"}}>▲</button>
+        <button onPointerDown={e=>{e.stopPropagation();e.preventDefault();reorder(1);}}  style={{background:"none",border:"none",cursor:"pointer",color:"var(--text3)",fontSize:9,padding:"2px 6px",lineHeight:1,touchAction:"none"}}>▼</button>
+      </div>}
+    </div>
+    {isFolder&&open&&(node.children||[]).map(c=><TreeNode key={c.id} node={c} depth={depth+1} parentId={node.id}/>)}
+  </div>);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// MODALS
+// ════════════════════════════════════════════════════════════════════════════
+function AddModal(){
+  const {data,update,modal,setModal,setActiveId,setView}=useApp();
+  const [name,setName]=useState(""); const [type,setType]=useState("entry");
+  const inputRef=useRef();
+  useEffect(()=>{const t=setTimeout(()=>inputRef.current?.focus(),100);return()=>clearTimeout(t);},[]);
+  const doAdd=()=>{
+    if(!name.trim())return;
+    const newId=uid();
+    const newNode=type==="folder"?{id:newId,name:name.trim(),type:"folder",children:[]}:{id:newId,name:name.trim(),type:"entry"};
+    update(prev=>{
+      const newTree=updateNodeTree(prev.tree,modal.parentId,n=>({...n,children:[...(n.children||[]),newNode]}));
+      const newEntries=type==="entry"?{...prev.entries,[newId]:{id:newId,name:name.trim(),fields:prev.globalColumns.reduce((a,c)=>({...a,[c]:[]}),{}),tags:[]}}:prev.entries;
+      return{...prev,tree:newTree,entries:newEntries};
+    });
+    setModal(null);if(type==="entry"){setActiveId(newId);setView("node");}
+  };
+  return(<div className="modal-overlay" onClick={()=>setModal(null)}>
+    <div className="modal" onClick={e=>e.stopPropagation()}>
+      <h3>Add New Item</h3>
+      <select value={type} onChange={e=>setType(e.target.value)}><option value="entry">📄 Entry</option><option value="folder">📁 Folder</option></select>
+      <input ref={inputRef} placeholder="Name…" value={name} onChange={e=>setName(e.target.value)} onKeyDown={e=>e.key==="Enter"&&doAdd()}/>
+      <div className="modal-btns"><button className="btn btn-ghost" onClick={()=>setModal(null)}>Cancel</button><button className="btn btn-amber" onClick={doAdd}>Add</button></div>
+    </div>
+  </div>);
+}
+
+function RenameModal(){
+  const {data,update,modal,setModal}=useApp();
+  const node=findNode(data.tree,modal.nodeId);
+  const [name,setName]=useState(node?.name||"");
+  const inputRef=useRef();
+  useEffect(()=>{const t=setTimeout(()=>inputRef.current?.focus(),100);return()=>clearTimeout(t);},[]);
+  const doRename=()=>{
+    if(!name.trim())return;
+    update(prev=>{const newTree=updateNodeTree(prev.tree,modal.nodeId,n=>({...n,name:name.trim()}));const newEntries=prev.entries[modal.nodeId]?{...prev.entries,[modal.nodeId]:{...prev.entries[modal.nodeId],name:name.trim()}}:prev.entries;return{...prev,tree:newTree,entries:newEntries};});
+    setModal(null);
+  };
+  return(<div className="modal-overlay" onClick={()=>setModal(null)}>
+    <div className="modal" onClick={e=>e.stopPropagation()}>
+      <h3>Rename</h3>
+      <input ref={inputRef} value={name} onChange={e=>setName(e.target.value)} onKeyDown={e=>e.key==="Enter"&&doRename()}/>
+      <div className="modal-btns"><button className="btn btn-ghost" onClick={()=>setModal(null)}>Cancel</button><button className="btn btn-amber" onClick={doRename}>Rename</button></div>
+    </div>
+  </div>);
+}
+
+function AddColModal(){
+  const {update,setModal}=useApp();
+  const [name,setName]=useState("");
+  const inputRef=useRef();
+  useEffect(()=>{const t=setTimeout(()=>inputRef.current?.focus(),100);return()=>clearTimeout(t);},[]);
+  const doAdd=()=>{
+    if(!name.trim())return;
+    const col=name.trim();
+    update(prev=>({...prev,globalColumns:[...prev.globalColumns,col],entries:Object.fromEntries(Object.entries(prev.entries).map(([id,e])=>[id,{...e,fields:{...e.fields,[col]:[]}}]))}));
+    setModal(null);
+  };
+  return(<div className="modal-overlay" onClick={()=>setModal(null)}>
+    <div className="modal" onClick={e=>e.stopPropagation()}>
+      <h3>Add Column</h3>
+      <input ref={inputRef} placeholder="Column name…" value={name} onChange={e=>setName(e.target.value)} onKeyDown={e=>e.key==="Enter"&&doAdd()}/>
+      <div className="modal-btns"><button className="btn btn-ghost" onClick={()=>setModal(null)}>Cancel</button><button className="btn btn-amber" onClick={doAdd}>Add</button></div>
+    </div>
+  </div>);
+}
+
+function MoveModal(){
+  const {data,update,modal,setModal}=useApp();
+  const isCopy=modal.isCopy; const nodeId=modal.nodeId;
+  const node=findNode(data.tree,nodeId);
+  const [selectedFolderId,setSelectedFolderId]=useState(()=>{
+    const path=getPath(data.tree,nodeId);
+    return path&&path.length>0?path[path.length-1].id:"root";
+  });
+  const nodeDescendantIds=new Set(getAllEntries(node||{id:nodeId,type:"entry"}));
+  nodeDescendantIds.add(nodeId);
+  const folders=[];
+  function collectFolders(n,depth=0){if(n.type==="folder"&&!nodeDescendantIds.has(n.id))folders.push({node:n,depth});(n.children||[]).forEach(c=>collectFolders(c,depth+1));}
+  collectFolders(data.tree);
+  const doMove=()=>{
+    if(!node)return;
+    update(prev=>{
+      if(isCopy){
+        const[cloned,idMap]=cloneSubtree(node);
+        const oldEntryIds=getAllEntries(node);
+        const newEntries={...prev.entries};
+        oldEntryIds.forEach(oldId=>{const newId=idMap[oldId];if(prev.entries[oldId])newEntries[newId]={...prev.entries[oldId],id:newId,name:prev.entries[oldId].name+" (copy)"};});
+        return{...prev,tree:updateNodeTree(prev.tree,selectedFolderId,f=>({...f,children:[...(f.children||[]),cloned]})),entries:newEntries};
+      }else{
+        const stripped=removeNodeTree(prev.tree,nodeId);
+        return{...prev,tree:updateNodeTree(stripped,selectedFolderId,f=>({...f,children:[...(f.children||[]),node]}))};
+      }
+    });
+    setModal(null);
+  };
+  return(<div className="modal-overlay" onClick={()=>setModal(null)}>
+    <div className="modal" onClick={e=>e.stopPropagation()}>
+      <h3>{isCopy?"📋 Copy":"📦 Move"} "{node?.name}"</h3>
+      <div style={{fontSize:12,color:"var(--text3)",fontFamily:"IBM Plex Mono,monospace",marginBottom:8}}>SELECT DESTINATION FOLDER:</div>
+      <div className="folder-picker">
+        {folders.map(({node:f,depth})=>(
+          <div key={f.id} className={`fp-row${selectedFolderId===f.id?" selected":""}`} style={{paddingLeft:12+depth*14}} onClick={()=>setSelectedFolderId(f.id)}>
+            <span>{selectedFolderId===f.id?"📂":"📁"}</span><span>{f.name}</span>
+          </div>
+        ))}
+      </div>
+      <div className="modal-btns"><button className="btn btn-ghost" onClick={()=>setModal(null)}>Cancel</button><button className="btn btn-amber" onClick={doMove}>{isCopy?"Copy here":"Move here"}</button></div>
+    </div>
+  </div>);
+}
+
+function ConfirmModal(){
+  const {modal,setModal}=useApp();
+  return(<div className="modal-overlay" onClick={()=>setModal(null)}>
+    <div className="modal" onClick={e=>e.stopPropagation()} style={{maxWidth:340}}>
+      <h3>🗑 Confirm Delete</h3>
+      <p style={{fontSize:14,color:"var(--text)",lineHeight:1.7,marginBottom:18}}>
+        Are you sure you want to delete <strong style={{color:"var(--amber)"}}>{modal.name}</strong>?
+        {modal.isFolder&&<span style={{display:"block",marginTop:6,fontSize:12,color:"var(--text3)"}}>This will also delete all entries inside it.</span>}
+        <span style={{display:"block",marginTop:6,fontSize:12,color:"var(--text3)"}}>You can restore it from Trash.</span>
+      </p>
+      <div className="modal-btns">
+        <button className="btn btn-ghost" onClick={()=>setModal(null)}>Cancel</button>
+        <button style={{background:"var(--red)",color:"#fff",border:"none",padding:"6px 16px",borderRadius:"var(--radius)",fontFamily:"IBM Plex Mono,monospace",fontSize:12,cursor:"pointer"}}
+          onClick={()=>{modal.onConfirm();setModal(null);}}>Delete</button>
+      </div>
+    </div>
+  </div>);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// SIGN-IN SCREEN
+// ════════════════════════════════════════════════════════════════════════════
+function SignInScreen({onSignIn}){
+  const [error,setError]=useState("");
+  const [loading,setLoading]=useState(false);
+
+  const handleSignIn=async()=>{
+    setLoading(true);setError("");
+    try{
+      const {auth,GoogleAuthProvider,signInWithPopup}=window._firebase;
+      const provider=new GoogleAuthProvider();
+      await signInWithPopup(auth,provider);
+      // onAuthStateChanged in App will handle the rest
+    }catch(e){
+      if(e.code!=="auth/popup-closed-by-user")
+        setError("Sign-in failed: "+e.message);
+      setLoading(false);
+    }
+  };
+
+  return(<div className="signin-screen">
+    <div className="signin-logo">📚</div>
+    <div className="signin-title">MedWiki</div>
+    <div className="signin-sub">Your personal medical knowledge base</div>
+    <button className="google-btn" onClick={handleSignIn} disabled={loading}>
+      <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" alt="Google"/>
+      {loading?"Signing in…":"Sign in with Google"}
+    </button>
+    {error&&<div className="signin-error">{error}</div>}
+    <div style={{fontSize:11,color:"#374151",fontFamily:"IBM Plex Mono,monospace",marginTop:8,textAlign:"center",maxWidth:280,lineHeight:1.7}}>
+      Your data is private and only accessible with your Google account.
+    </div>
+  </div>);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// APP
+// ════════════════════════════════════════════════════════════════════════════
+export default function App(){
+  const [user,setUser]               = useState(undefined); // undefined=loading, null=signed out
+  const [data,setData]               = useState(null);
+  const [loading,setLoading]         = useState(true);
+  const [saveStatus,setSaveStatus]   = useState(""); // "saving" | "saved" | ""
+  const dataRef                      = useRef(null);
+  const [activeId,setActiveId]       = useState(null);
+  const [searchQ,setSearchQ]         = useState("");
+  const [modal,setModal]             = useState(null);
+  const [compareIds,setCompareIds]   = useState([]);
+  const [showCompare,setShowCompare] = useState(false);
+  const [filterTag,setFilterTag]     = useState("");
+  const [view,setView]               = useState("node");
+  const [sidebarOpen,setSidebarOpen] = useState(true);
+  const [theme,setTheme]             = useState("dark");
+  const saveTimer                    = useRef(null);
+
+  useEffect(()=>{document.documentElement.className=theme==="light"?"light":"";},[theme]);
+
+  // Auth state listener
+  useEffect(()=>{
+    const {auth,onAuthStateChanged}=window._firebase;
+    return onAuthStateChanged(auth,async u=>{
+      setUser(u);
+      if(u){
+        setLoading(true);
+        try{
+          const raw=await fbLoad(u.uid);
+          const d=raw?JSON.parse(raw):INITIAL_DATA;
+          if(!d.trash)d.trash=[];
+          dataRef.current=d;setData(d);
+        }catch{dataRef.current=INITIAL_DATA;setData(INITIAL_DATA);}
+        setLoading(false);
+      }else{
+        setData(null);setLoading(false);
+      }
+    });
+  },[]);
+
+  // Save to Firestore (debounced)
+  const save=useCallback(async(d,uid)=>{
+    clearTimeout(saveTimer.current);
+    setSaveStatus("saving");
+    saveTimer.current=setTimeout(async()=>{
+      try{
+        await fbSave(uid,JSON.stringify(d));
+        setSaveStatus("saved");
+        setTimeout(()=>setSaveStatus(""),2000);
+      }catch(e){setSaveStatus("");}
+    },800);
+  },[]);
+
+  const update=useCallback(fn=>{
+    setData(prev=>{
+      const next=fn(prev);
+      dataRef.current=next;
+      if(user)save(next,user.uid);
+      return next;
+    });
+  },[save,user]);
+
+  const handleSelectEntry=useCallback(id=>{setCompareIds(prev=>prev.includes(id)?prev.filter(x=>x!==id):[...prev,id]);},[]);
+
+  const signOut=()=>{const {auth,signOut:so}=window._firebase;so(auth);};
+
+  const ctx={data,update,dataRef,activeId,setActiveId,searchQ,setSearchQ,modal,setModal,
+    compareIds,setCompareIds,showCompare,setShowCompare,filterTag,setFilterTag,view,setView,handleSelectEntry};
+
+  // Loading spinner
+  if(user===undefined||loading)
+    return(<div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"100vh",background:"#0d1117",fontFamily:"Playfair Display,serif",color:"#d4a017",fontSize:20,flexDirection:"column",gap:16}}>
+      <div style={{fontSize:36}}>📚</div>Loading…
+    </div>);
+
+  // Sign-in screen
+  if(!user) return <SignInScreen/>;
+
+  const activeNode=activeId?findNode(data.tree,activeId):null;
+  const path=activeId?getPath(data.tree,activeId):null;
+
+  const renderContent=()=>{
+    if(view==="trash")  return <TrashView/>;
+    if(view==="compare")return <CompareView/>;
+    if(showCompare)return(<div className="fade-in">
+      <div style={{background:"var(--amber-dim)",border:"1px solid var(--amber)",borderRadius:10,padding:"20px 24px",marginBottom:16}}>
+        <div style={{fontFamily:"Playfair Display,serif",fontSize:17,color:"var(--amber2)",marginBottom:8}}>⚖️ Compare Mode</div>
+        {compareIds.length>0&&<div style={{display:"flex",alignItems:"center",gap:10}}>
+          <span style={{fontFamily:"IBM Plex Mono,monospace",fontSize:12,color:"var(--amber2)"}}>✓ {compareIds.length} selected</span>
+          <button className="btn btn-amber" onClick={()=>setView("compare")}>Compare ▸</button>
+        </div>}
+      </div>
+      <div style={{display:"flex",flexDirection:"column",gap:5}}>
+        {Object.values(data.entries).map(entry=>{const checked=compareIds.includes(entry.id);return(
+          <div key={entry.id} onClick={()=>handleSelectEntry(entry.id)}
+            style={{display:"flex",alignItems:"center",gap:10,background:checked?"var(--amber-dim)":"var(--bg2)",border:`1px solid ${checked?"var(--amber)":"var(--border)"}`,borderRadius:8,padding:"9px 14px",cursor:"pointer",transition:"all .15s"}}>
+            <input type="checkbox" className="entry-select-check" checked={checked} readOnly/>
+            <span style={{fontFamily:"Playfair Display,serif",fontSize:14,color:checked?"var(--amber2)":"var(--text)"}}>{entry.name}</span>
+            <span style={{display:"flex",gap:4,marginLeft:"auto"}}>{entry.tags?.map(t=><span key={t} className="tag">{t}</span>)}</span>
+          </div>
+        );})}
+      </div>
+    </div>);
+    if(view==="search"||searchQ.trim())return <SearchView/>;
+    if(!activeId||!activeNode)return <div className="empty fade-in"><div className="empty-icon">🗂️</div><p>Select an item from the sidebar<br/>or search to get started.</p></div>;
+    if(activeNode.type==="folder")return <FolderView node={activeNode}/>;
+    if(activeNode.type==="entry") return <EntryView entryId={activeId}/>;
+  };
+
+  const titleText=view==="trash"?"🗑 Trash":view==="compare"?"Compare Entries":searchQ.trim()?`Search: ${searchQ}`:activeNode?.name||"Knowledge Base";
+
+  return(<Ctx.Provider value={ctx}>
+    <style>{CSS}</style>
+    <div id="app">
+      {sidebarOpen&&<div className="sidebar">
+        <div className="sidebar-header">
+          <div className="sidebar-title">📚 MedWiki</div>
+          {/* User row */}
+          <div className="user-row">
+            {user.photoURL&&<img className="user-avatar" src={user.photoURL} alt=""/>}
+            <span className="user-name">{user.displayName||user.email}</span>
+            <button className="signout-btn" onClick={signOut}>Sign out</button>
+          </div>
+          <div className="search-wrap" style={{marginTop:8}}>
+            <span className="search-icon">🔍</span>
+            <input className="search-input" placeholder="Search…" value={searchQ}
+              onChange={e=>{setSearchQ(e.target.value);if(e.target.value.trim())setView("search");}}
+              onKeyDown={e=>e.key==="Escape"&&setSearchQ("")}/>
+          </div>
+        </div>
+        <div className="tree-scroll"><TreeNode node={data.tree} depth={0} parentId="root"/></div>
+        {showCompare&&compareIds.length>0&&<div className="compare-bar">
+          <span>{compareIds.length} selected</span>
+          <button className="btn btn-amber btn-sm" onClick={()=>{setView("compare");setSearchQ("");}}>Compare ▸</button>
+        </div>}
+        <div className="sidebar-footer">
+          <button className="btn btn-ghost btn-sm" style={{flex:1}} onClick={()=>setModal({type:"add",parentId:"root"})}>+ Add</button>
+          <button className={`btn btn-sm ${showCompare?"btn-amber":"btn-ghost"}`}
+            onClick={()=>{setShowCompare(v=>!v);if(showCompare){setCompareIds([]);if(view==="compare")setView("node");}}}>⚖️</button>
+          <button className="btn btn-ghost btn-sm" title={theme==="dark"?"Switch to day theme":"Switch to night theme"}
+            onClick={()=>setTheme(t=>t==="dark"?"light":"dark")}>
+            {theme==="dark"?"☀️":"🌙"}
+          </button>
+          <button className={`btn btn-sm ${view==="trash"?"btn-amber":"btn-ghost"}`} style={{position:"relative"}}
+            onClick={()=>setView(v=>v==="trash"?"node":"trash")}>
+            🗑{(data.trash||[]).length>0&&<span style={{position:"absolute",top:-4,right:-4,background:"var(--red)",color:"#fff",borderRadius:"50%",fontSize:9,width:15,height:15,display:"flex",alignItems:"center",justifyContent:"center"}}>{(data.trash||[]).length}</span>}
+          </button>
+        </div>
+      </div>}
+      <div className="main">
+        <div className="topbar">
+          <button className="btn btn-ghost btn-sm" onClick={()=>setSidebarOpen(v=>!v)}>{sidebarOpen?"◀":"▶"}</button>
+          <div className="topbar-title">
+            {activeNode?.type==="entry"
+              ?<input value={activeNode.name} onChange={e=>{const val=e.target.value;update(prev=>({...prev,tree:updateNodeTree(prev.tree,activeId,n=>({...n,name:val})),entries:{...prev.entries,[activeId]:{...prev.entries[activeId],name:val}}}));}}/>
+              :activeNode?.type==="folder"&&activeNode.id!=="root"&&view==="node"
+              ?<input value={activeNode.name} onChange={e=>{const val=e.target.value;update(prev=>({...prev,tree:updateNodeTree(prev.tree,activeId,n=>({...n,name:val}))}));}}/>
+              :titleText}
+          </div>
+          {/* Save indicator */}
+          {saveStatus&&<span style={{fontSize:11,fontFamily:"IBM Plex Mono,monospace",color:saveStatus==="saved"?"#4c8":"var(--text3)"}}>
+            {saveStatus==="saving"?"⏳ Saving…":"✓ Saved"}
+          </span>}
+          {activeNode&&activeNode.id!=="root"&&view==="node"&&(()=>{
+            return(<>
+              <button className="btn btn-ghost btn-sm" title="Move to folder" onClick={()=>setModal({type:"move",nodeId:activeNode.id,isCopy:false})}>📦</button>
+              {activeNode.type==="entry"&&<button className="btn btn-ghost btn-sm" title="Copy to folder" onClick={()=>setModal({type:"move",nodeId:activeNode.id,isCopy:true})}>📋</button>}
+              <button className="btn btn-ghost btn-sm" style={{color:"var(--red)",borderColor:"var(--red)",flexShrink:0}} onClick={()=>{
+                const snap=JSON.parse(JSON.stringify(activeNode));
+                setModal({type:"confirm",name:snap.name,isFolder:snap.type==="folder",onConfirm:()=>{
+                  const entryIds=getAllEntries(snap);
+                  update(prev=>{
+                    const entriesCopy={};
+                    entryIds.forEach(id=>{if(prev.entries[id])entriesCopy[id]=prev.entries[id];});
+                    const pp=getPath(prev.tree,snap.id);
+                    const pid=pp&&pp.length>0?pp[pp.length-1].id:"root";
+                    return{...prev,tree:removeNodeTree(prev.tree,snap.id),entries:Object.fromEntries(Object.entries(prev.entries).filter(([id])=>!entryIds.includes(id))),trash:[...(prev.trash||[]),{id:uid(),name:snap.name,deletedAt:Date.now(),subtree:snap,parentId:pid,entries:entriesCopy}]};
+                  });
+                  setActiveId(null);setView("node");
+                }});
+              }}>🗑</button>
+            </>);
+          })()}
+          {view!=="compare"&&activeNode?.type!=="entry"&&view==="node"&&<button className="btn btn-ghost btn-sm" onClick={()=>setModal({type:"addcol"})}>+ Col</button>}
+          {view==="compare"&&<button className="btn btn-ghost btn-sm" onClick={()=>{setCompareIds([]);setShowCompare(false);setView("node");}}>✕ Compare</button>}
+        </div>
+        <div className="content">
+          {path&&view!=="compare"&&!searchQ.trim()&&<div className="breadcrumb">
+            {path.map((n,i)=><span key={n.id} onClick={()=>{setActiveId(n.id);setView("node");}}>
+              {n.name}{i<path.length-1&&<span style={{color:"var(--border)"}}> › </span>}
+            </span>)}
+          </div>}
+          {renderContent()}
+        </div>
+      </div>
+    </div>
+    {modal?.type==="add"     &&<AddModal/>}
+    {modal?.type==="rename"  &&<RenameModal/>}
+    {modal?.type==="addcol"  &&<AddColModal/>}
+    {modal?.type==="move"    &&<MoveModal/>}
+    {modal?.type==="confirm" &&<ConfirmModal/>}
+  </Ctx.Provider>);
+}
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<App/>);
+</script>
+</body>
+</html>
