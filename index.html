@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>MedWiki</title>
+<style>
+body { background: #0d1117; color: #d4a017; font-family: serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; flex-direction: column; gap: 16px; }
+</style>
+</head>
+<body>
+<div style="font-size:48px">📚</div>
+<div style="font-size:28px">MedWiki</div>
+<div id="status" style="font-size:14px; color:#6b7280;">Checking...</div>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
+<script>
+  var s = document.getElementById('status');
+  try {
+    firebase.initializeApp({
+      apiKey: "AIzaSyBmWDaNqPTxYGLYw1ttuuNt9-cKuLfT2wM",
+      authDomain: "medwiki-d9836.firebaseapp.com",
+      projectId: "medwiki-d9836",
+    });
+    s.textContent = "✓ Firebase works! Hosting works!";
+    s.style.color = "#4c8";
+  } catch(e) {
+    s.textContent = "Error: " + e.message;
+    s.style.color = "#e05c5c";
+  }
+</script>
+</body>
+</html>
