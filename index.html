@@ -72,6 +72,14 @@
 </head>
 <body>
 <div id="root"></div>
+<div id="fatal-error"></div>
+<script>
+window.onerror=function(msg,src,line,col,err){
+  var el=document.getElementById("fatal-error");
+  if(el){el.style.display="block";el.textContent="ERROR: "+msg+"\nFile: "+src+"\nLine: "+line+"\n\n"+(err?err.stack:"");}
+  return false;
+};
+</script>
 
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useCallback, useRef, createContext, useContext } = React;
