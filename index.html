@@ -11,18 +11,11 @@
 <!-- Babel for JSX -->
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
-<!-- Firebase -->
-<script type="module">
-  import { initializeApp }                              from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-  import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged }
-                                                        from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
-  import { getFirestore, doc, getDoc, setDoc, deleteDoc }
-                                                        from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
-
-  // ══════════════════════════════════════════════════════════════
-  // 🔧 PASTE YOUR FIREBASE CONFIG HERE
-  // Get it from: Firebase Console → Project Settings → Your Apps
-  // ══════════════════════════════════════════════════════════════
+<!-- Firebase compat (works everywhere, no module needed) -->
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
+<script>
   const firebaseConfig = {
     apiKey:            "AIzaSyBmWDaNqPTxYGLYw1ttuuNt9-cKuLfT2wM",
     authDomain:        "medwiki-d9836.firebaseapp.com",
@@ -31,16 +24,21 @@
     messagingSenderId: "551783854741",
     appId:             "1:551783854741:web:189e7978e6a61bb635a19c",
   };
-  // ══════════════════════════════════════════════════════════════
 
-  const app  = initializeApp(firebaseConfig);
-  const auth = getAuth(app);
-  const db   = getFirestore(app);
+  firebase.initializeApp(firebaseConfig);
+  const auth = firebase.auth();
+  const db   = firebase.firestore();
 
-  // Expose to the React app via window
   window._firebase = {
-    auth, db, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged,
-    doc, getDoc, setDoc, deleteDoc,
+    auth, db,
+    GoogleAuthProvider: firebase.auth.GoogleAuthProvider,
+    signInWithPopup: (auth, provider) => auth.signInWithPopup(provider),
+    signOut: (auth) => auth.signOut(),
+    onAuthStateChanged: (auth, cb) => auth.onAuthStateChanged(cb),
+    doc: (db, ...args) => db.collection(args[0]).doc(args.slice(1).join("/")),
+    getDoc: (ref) => ref.get(),
+    setDoc: (ref, data) => ref.set(data),
+    deleteDoc: (ref) => ref.delete(),
   };
 </script>
 
@@ -82,22 +80,22 @@ const { useState, useEffect, useCallback, useRef, createContext, useContext } = 
 // FIREBASE HELPERS  (swappable — rest of app doesn't touch Firebase directly)
 // ════════════════════════════════════════════════════════════════════════════
 async function fbLoad(uid) {
-  const { db, doc, getDoc } = window._firebase;
-  const snap = await getDoc(doc(db, "users", uid, "kb", "data"));
-  return snap.exists() ? snap.data().payload : null;
+  const { db } = window._firebase;
+  const snap = await db.collection("users").doc(uid).collection("kb").doc("data").get();
+  return snap.exists ? snap.data().payload : null;
 }
 async function fbSave(uid, data) {
-  const { db, doc, setDoc } = window._firebase;
-  await setDoc(doc(db, "users", uid, "kb", "data"), { payload: data, updatedAt: Date.now() });
+  const { db } = window._firebase;
+  await db.collection("users").doc(uid).collection("kb").doc("data").set({ payload: data, updatedAt: Date.now() });
 }
 async function fbSaveSync(uid, code, payload) {
-  const { db, doc, setDoc } = window._firebase;
-  await setDoc(doc(db, "syncs", code), { payload, createdAt: Date.now() });
+  const { db } = window._firebase;
+  await db.collection("syncs").doc(code).set({ payload, createdAt: Date.now() });
 }
 async function fbLoadSync(code) {
-  const { db, doc, getDoc } = window._firebase;
-  const snap = await getDoc(doc(db, "syncs", code));
-  return snap.exists() ? snap.data().payload : null;
+  const { db } = window._firebase;
+  const snap = await db.collection("syncs").doc(code).get();
+  return snap.exists ? snap.data().payload : null;
 }
 
 // ════════════════════════════════════════════════════════════════════════════
